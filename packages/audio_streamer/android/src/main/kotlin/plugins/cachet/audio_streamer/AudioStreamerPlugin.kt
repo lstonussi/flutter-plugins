@@ -1,30 +1,46 @@
 package plugins.cachet.audio_streamer
 
 import android.app.Activity
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.Process
 import android.util.Log
 import androidx.annotation.NonNull
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.EventChannel.EventSink
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry.RequestPermissionsResultListener
-import java.util.*
+
 
 /** AudioStreamerPlugin */
-class AudioStreamerPlugin : FlutterPlugin, RequestPermissionsResultListener, EventChannel.StreamHandler, ActivityAware {
+const val CHANNEL = "AudioStreamer"
+const val CHANNEL_NOTIFICATION = "AudioStreamerNotification"
+const val NOTIFICATION_ID = 0xb339
+
+class AudioStreamerPlugin : FlutterPlugin, RequestPermissionsResultListener,
+    EventChannel.StreamHandler, ActivityAware, MethodChannel.MethodCallHandler {
+
+    companion object {
+        const val START_SERVICE = "start_service"
+        const val STOP_SERVICE = "stop_service"
+    }
 
     /// Constants
     private val eventChannelName = "audio_streamer.eventChannel"
     private val sampleRate = 44100
-    private var bufferSize = 6400 * 2; /// Magical number!
+    private var bufferSize = 6400 * 2 /// Magical number!
     private val maxAmplitude = 32767 // same as 2^15
     private val logTag = "AudioStreamerPlugin"
 
@@ -33,12 +49,49 @@ class AudioStreamerPlugin : FlutterPlugin, RequestPermissionsResultListener, Eve
     private var recording = false
 
     private var currentActivity: Activity? = null
+    private lateinit var channel: MethodChannel
+    private var context: Context? = null
 
     override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
+        channel = MethodChannel(flutterPluginBinding.binaryMessenger, CHANNEL)
+        channel.setMethodCallHandler(this)
         val messenger = flutterPluginBinding.binaryMessenger
         val eventChannel = EventChannel(messenger, eventChannelName)
         eventChannel.setStreamHandler(this)
+        context = flutterPluginBinding.applicationContext
     }
+
+    override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: MethodChannel.Result) {
+        when (call.method) {
+            START_SERVICE -> {
+                Log.d(CHANNEL, "start_service")
+                try {
+                    val thread = HandlerThread("myThread")
+                    thread.start()
+
+                    val handler = Handler(thread.looper)
+                    handler.post {
+                        context?.let {
+//                    it.startService(Intent(it, AudioService::class.java))
+                            ContextCompat.startForegroundService(
+                                it,
+                                Intent(it, AudioService::class.java)
+                            )
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.d(CHANNEL, "error: start_service ==> $e")
+                }
+            }
+            STOP_SERVICE -> {
+                Log.d(CHANNEL, "stop_service")
+                context?.let {
+                    it.stopService(Intent(it, AudioService::class.java))
+                }
+            }
+        }
+    }
+
 
     override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
         recording = false
@@ -81,7 +134,11 @@ class AudioStreamerPlugin : FlutterPlugin, RequestPermissionsResultListener, Eve
     /**
      * Called by the plugin itself whenever it detects that permissions have not been granted.
      */
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray): Boolean {
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray
+    ): Boolean {
         val requestAudioPermissionCode = 200
         when (requestCode) {
             requestAudioPermissionCode -> if (grantResults[0] == PackageManager.PERMISSION_GRANTED) return true
@@ -102,11 +159,12 @@ class AudioStreamerPlugin : FlutterPlugin, RequestPermissionsResultListener, Eve
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
             val audioBuffer = ShortArray(bufferSize / 2)
             val record = AudioRecord(
-                    MediaRecorder.AudioSource.DEFAULT,
-                    sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufferSize)
+                MediaRecorder.AudioSource.DEFAULT,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize
+            )
             if (record.state != AudioRecord.STATE_INITIALIZED) {
                 Log.e(logTag, "Audio Record can't initialize!")
                 return@Runnable
